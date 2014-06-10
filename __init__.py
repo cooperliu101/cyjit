@@ -1,3 +1,3 @@
-from ._cyjit import make
+from ._cyjit import jit
 
-__all__=['make']
+__all__=['jit']
