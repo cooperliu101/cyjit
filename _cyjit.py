@@ -191,7 +191,12 @@ def jit(sig, **kwds):
         
         func_name=py_func.__name__
         
-        caller_context=sys._getframe(1).f_locals #get caller's scope
+        #dont use this hack
+        #caller_context=sys._getframe(1).f_locals #get caller's scope
+        
+        import __main__
+        caller_context=__main__.__dict__
+        #print caller_context['f'], getattr(__main__,'f')
 
         py_src=get_func_source(py_func)
         args=get_args(py_func)                                                                                                                                    
