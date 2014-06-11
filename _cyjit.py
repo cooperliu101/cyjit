@@ -141,10 +141,28 @@ def rebuild_attribute_func(node):
     return '.'.join(names)
   
 class VisitJittedFunc(ast.NodeVisitor):
-    def visit_in_context(self, node, context, func_list):
+    def visit_in_context(self, node, context, func_list, local_names, load_names):
         self.context=context
         self.func_list=func_list
+        self.local_names=local_names
+        self.load_names=load_names
         super(VisitJittedFunc, self).visit(node)
+    def visit_Name(self, node):
+        name=node.id
+        if isinstance(node.ctx, ast.Store):
+            self.local_names.add(name)
+            
+        if isinstance(node.ctx, ast.Load) and (name not in self.local_names) and (name in self.context):
+            print name, 'load from globals'
+            self.load_names.add(name)
+            #try:
+                #value=eval(name, self.context, {})
+            #except:
+                #print 'can not find Name %s in globals'%name
+            #else:
+                #print 'find Name %s in globals'%name
+                
+    
     def visit_Call(self, node):
         #print ast.dump(node)
         assert isinstance(node.func, (ast.Name, ast.Attribute))
@@ -157,7 +175,9 @@ class VisitJittedFunc(ast.NodeVisitor):
             else:
                 if isinstance(func, JittedFunc):
                     #print 'jitedfunc',func
-                    self.func_list.append((func, 'direct', ''))   
+                    self.func_list.add((func, 'direct', ''))
+                else:
+                    self.visit_Name(node.func)
                     
         elif isinstance(node.func, ast.Attribute):
             attribute_func_name=rebuild_attribute_func(node.func)
@@ -168,7 +188,7 @@ class VisitJittedFunc(ast.NodeVisitor):
             else:
                 if isinstance(func, JittedFunc):
                     #print 'jitedfunc',func
-                    self.func_list.append((func, 'attribute', attribute_func_name))            
+                    self.func_list.add((func, 'attribute', attribute_func_name))            
        
 
       
@@ -176,6 +196,11 @@ jvisit=VisitJittedFunc().visit_in_context
 
 pyx_buf=StringIO()
 pxd_buf=StringIO() 
+
+
+def newjit(sig, **kwds):
+    pass
+
 
 def jit(sig, **kwds):
     
@@ -187,16 +212,14 @@ def jit(sig, **kwds):
         pxd_buf.seek(0)
         pxd_buf.truncate()  
         
-        called_jitted_funcs=[]
+        called_jitted_funcs=set()
+        local_names=set() #in py_func
+        load_names=set() #in py_func
         
         func_name=py_func.__name__
-        
-        #dont use this hack
-        #caller_context=sys._getframe(1).f_locals #get caller's scope
-        
-        import __main__
-        caller_context=__main__.__dict__
-        #print caller_context['f'], getattr(__main__,'f')
+        func_globals_name='func_%s_globals'%func_name
+        #func_globals=sys._getframe(1).f_locals #get caller's scope
+        func_globals=py_func.func_globals
 
         py_src=get_func_source(py_func)
         args=get_args(py_func)                                                                                                                                    
@@ -206,7 +229,7 @@ def jit(sig, **kwds):
         func_def='cpdef'        
 
         func_ast=ast.parse(py_src)
-        jvisit(func_ast, caller_context, called_jitted_funcs)
+        jvisit(func_ast, func_globals, called_jitted_funcs, local_names, load_names)
         #print called_jitted_funcs
         for jitted_func, mode, extra in called_jitted_funcs:
             
@@ -220,6 +243,13 @@ def jit(sig, **kwds):
 
         pyx_buf.write('\n')
         
+        pyx_buf.write('''
+import sys
+%s=sys._getframe(1).f_locals
+'''%func_globals_name)
+        for name in load_names:
+            pyx_buf.write("%s=%s.get('%s')\n"%(name, func_globals_name, name))
+        pyx_buf.write('\n')
         
         #process signature
         
@@ -277,11 +307,11 @@ def jit(sig, **kwds):
         pyx_src=pyx_buf.getvalue()
         pxd_src=pxd_buf.getvalue()
         
-        base_name=os.path.basename(caller_context['__file__'])
+        base_name=os.path.basename(func_globals['__file__'])
         file_name=os.path.splitext(base_name)[0]
         key = pyx_src+str(sys.version_info)+sys.executable+cython.__version__
         hashed_module_name = file_name+'_'+func_name+'__'+hashlib.md5(key.encode('utf-8')).hexdigest()
-        caller_file_dir=os.path.dirname(os.path.abspath(caller_context['__file__']))
+        caller_file_dir=os.path.dirname(os.path.abspath(func_globals['__file__']))
         #print 'caller_file_dir', caller_file_dir
         module_dir=os.path.join(caller_file_dir, '__cython_compile__')
         if not os.path.exists(module_dir):
