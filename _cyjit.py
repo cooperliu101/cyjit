@@ -173,8 +173,8 @@ class VisitJittedFunc(ast.NodeVisitor):
             except:
                 print 'can not find func %s'%node.func.id
             else:
-                if isinstance(func, JittedFunc):
-                    #print 'jitedfunc',func
+                if isinstance(func, DeferedJittedFunc):
+                    print 'jitedfunc',func.func_name
                     self.func_list.add((func, 'direct', ''))
                 else:
                     self.visit_Name(node.func)
@@ -186,20 +186,227 @@ class VisitJittedFunc(ast.NodeVisitor):
             except:
                 print 'can not find func %s'%attribute_func_name
             else:
-                if isinstance(func, JittedFunc):
+                if isinstance(func, DeferedJittedFunc):
                     #print 'jitedfunc',func
                     self.func_list.add((func, 'attribute', attribute_func_name))            
-       
 
-      
 jvisit=VisitJittedFunc().visit_in_context
 
-pyx_buf=StringIO()
-pxd_buf=StringIO() 
+class DeferedJittedFunc(object):
+    #__slots__=['sig', 'options', 'py_func', 'func_globals', 'func_name', 'module_name', 'module_dir', 'pyx_src', 'pxd_src']
+    def __init__(self, sig, options, py_func):
+        self.sig=sig
+        self.options=options
+        self.py_func=py_func
+        self.func_globals=py_func.func_globals
+        self.func_name=py_func.__name__
+        self.module_name=os.path.splitext(os.path.basename(self.func_globals['__file__']))[0]+'_'+self.func_name
+        self.module_dir=''
+        self.pyx_buf=StringIO()
+        self.pxd_buf=StringIO()
+        self.pyx_src=''
+        self.pxd_src=''
+        self.called_jitted_funcs=set()
+        self.load_names=set()
+        self.local_names=set()
+        self.c_func=None
+        self.compile_state='not_compile'
+       
+    
+    def compile(self): #compile and load c_func
+        
+        self.compile_state='compiling'
+       
+        
+        func_globals_name='func_%s_globals'%self.func_name
+        #func_globals=sys._getframe(1).f_locals #get caller's scope
+
+        py_src=get_func_source(self.py_func)
+        args=get_args(self.py_func)                                                                                                                                    
+        body=get_body(py_src)
+        #print py_src
+        indent=get_indent(body)
+        func_def='cpdef'        
+
+        func_ast=ast.parse(py_src)
+        jvisit(func_ast, self.func_globals, self.called_jitted_funcs, self.local_names, self.load_names)
+               
+        
+        #print called_jitted_funcs
+        for jitted_func, mode, extra in self.called_jitted_funcs:
+            
+            if mode=='direct':
+                self.pyx_buf.write("from %s cimport %s\n"%(jitted_func.module_name, jitted_func.func_name))
+                self.pyx_buf.write("from %s import %s_init"%(jitted_func.module_name, jitted_func.func_name))
+            elif mode=='attribute':#fix
+                self.pyx_buf.write('cimport %s\n'%(jitted_func.module_name,))
+                attribute_func_name=extra
+                #
+                body=re.sub('%s *\('%attribute_func_name, '%s.%s('%(jitted_func.module_name, jitted_func.func_name), body)
+
+        self.pyx_buf.write('\n')
 
 
-def newjit(sig, **kwds):
-    pass
+        #process signature
+        formated_sig=self.sig.replace(' ','')
+        if formated_sig:
+            return_type, arg_types=parse_sig(formated_sig)
+            assert len(args)==len(arg_types), "the function %s has %s args but the signature has %s args "%(func_name, len(args), len(arg_types))
+            func_args=[]
+            for arg_name, arg_type in zip(args, arg_types):
+                func_args.append('%s %s'%(arg_type, arg_name))
+            func_args=", ".join(func_args)
+        else:
+            func_args=', '.join(args)
+            return_type=''
+            
+        #directives
+        #print "in"
+        directive_decorates=[]
+        directives=['wraparound', 'boundscheck']
+        for directive in directives:
+            value=self.options.get(directive)
+            if value != None:
+                directive_decorates.append('@cython.%s(%s)\n'%(directive, value))
+        if directive_decorates:
+            self.pyx_buf.write('cimport cython\n\n')
+            for decorate in directive_decorates:
+                self.pyx_buf.write(decorate)
+                
+        nogil='nogil' if self.options.get("nogil") else ''
+        #head
+        #add like 'nogil'
+        func_head='%s %s %s(%s) %s'%(func_def, return_type, self.func_name, func_args, nogil)
+        func_init_head='def %s_init(f_globals)'%(self.func_name)
+        #func_head_1='\n%s %s(%s)%s'%('cdef', func_name, func_args, '')
+        self.pxd_buf.write(func_head+"\n")
+        #self.pxd_buf.write(func_init_head+"\n")
+        
+        func_globals_name='_%s_globals'%self.func_name
+        self.pyx_buf.write('%s=None\n'%func_globals_name)
+        self.pyx_buf.write(func_init_head+':\n')
+        self.pyx_buf.write(indent+'global %s\n'%func_globals_name)
+        self.pyx_buf.write(indent+'%s=f_globals\n'%func_globals_name)
+        self.pyx_buf.write('\n')
+        
+        
+        self.pyx_buf.write(func_head+':\n')
+        #cdef vars
+        locals=self.options.get('locals')
+        if type(locals) is str:
+            self.pyx_buf.write(indent+"cdef:\n")
+            for line in locals.strip().split('\n'):
+                line=line.strip()
+                if line[-1]==';':
+                    line=line[:-1]
+                self.pyx_buf.write(indent*2+line+'\n')
+            
+        #if type(locals) is str:
+        #    for type_name, vars_name in parse_cdeclare(locals):
+        #        cdef=indent+'cdef %s %s\n'%(type_name, vars_name)
+        #        pyx_buf.write(cdef)
+        
+        #body
+        #self.pyx_buf.write(indent+'%s=sys._getframe(1).f_locals\n'%func_globals_name)
+        for name in self.load_names:
+            self.pyx_buf.write(indent+"%s=%s['%s']\n"%(name, func_globals_name, name))
+        self.pyx_buf.write('\n')    
+        self.pyx_buf.write(indent+'print "%s", %s["__file__"]\n'%(self.func_name, func_globals_name))
+        self.pyx_buf.write(body+'\n')
+        
+        self.pyx_src=self.pyx_buf.getvalue()
+        self.pxd_src=self.pxd_buf.getvalue()
+        
+      
+        
+        func_file_dir=os.path.dirname(os.path.abspath(self.func_globals['__file__']))
+                #print 'caller_file_dir', caller_file_dir
+        cython_compile_dir=os.path.join(func_file_dir, '__cython_compile__')
+        if not os.path.exists(cython_compile_dir):
+            os.mkdir(cython_compile_dir)
+            
+        key = self.pyx_src+str(sys.version_info)+sys.executable+cython.__version__
+        self.module_dir=os.path.join(cython_compile_dir, self.module_name+'__'+hashlib.md5(key.encode('utf-8')).hexdigest() )        
+        if not os.path.exists(self.module_dir):
+            os.mkdir(self.module_dir)
+
+        for jitted_func,_,_ in self.called_jitted_funcs:
+            assert isinstance(jitted_func, DeferedJittedFunc)
+            if jitted_func.compile_state=='not_compile':
+                jitted_func.compile()        
+        
+        pyx_file=os.path.join(self.module_dir, self.module_name+'.pyx')
+        pxd_file=os.path.join(self.module_dir, self.module_name+'.pxd')
+        so_ext='.pyd'        
+        so_file=os.path.join(self.module_dir, self.module_name+so_ext)        
+        init_file=os.path.join(self.module_dir, '__init__.py')
+        
+        
+        #check
+        if not os.path.exists(so_file):            
+        
+            fw=open(pyx_file,"w")
+            fw.write(self.pyx_src)
+            fw.close()
+            
+            fw=open(pxd_file,"w")
+            fw.write(self.pxd_src)
+            fw.close()
+            
+            fw=open(init_file, "w")
+            fw.close()
+            
+            
+            extension = Extension(name = self.module_name,
+                                  sources = [pyx_file],
+                                  #include_dirs = c_include_dirs,
+                                  #extra_compile_args = cflags
+                                 )
+                        
+            #find called_jitted_funcs's module path
+            cython_include_dirs=[]
+            for jitted_func, _, _ in self.called_jitted_funcs:
+                cython_include_dirs.append(jitted_func.module_dir)
+            print 'cython_include_dirs', self.func_name, cython_include_dirs
+            build_extension = _get_build_extension()
+            build_extension.extensions = cythonize([extension],
+                                                   #annotate=True,
+                                                   include_path=cython_include_dirs, 
+                                                   #quiet=quiet
+                                                   )
+            temp_dir=os.path.join(cython_compile_dir, "__build_temp__")
+            build_extension.build_temp = temp_dir 
+            build_extension.build_lib  = self.module_dir
+            #print "build"
+            build_extension.run()
+    
+        compiled_module=imp.load_dynamic(self.module_name, so_file) 
+        for jitted_func, _, _ in self.called_jitted_funcs:    
+            func_init=getattr(compiled_module, "%s_init"%jitted_func.func_name)
+            func_init(jitted_func.func_globals)
+            
+        func_init=getattr(compiled_module, "%s_init"%self.func_name)
+        func_init(self.func_globals)
+        
+        print 'load',self.module_name
+        c_func=getattr(compiled_module, self.func_name)        
+        self.compile_state='compiled'
+        self.c_func=c_func
+
+        
+    def __call__(self, *args, **kwds):
+        if self.compile_state=='not_compile':
+            self.compile()
+        assert self.compile_state=='compiled'
+        return self.c_func(*args, **kwds)           
+
+
+
+def newjit(sig, **options): #move jit into call
+    def wrap(py_func):
+        
+        return DeferedJittedFunc(sig, options, py_func)
+    return wrap
 
 
 def jit(sig, **kwds):
