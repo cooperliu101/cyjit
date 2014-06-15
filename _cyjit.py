@@ -141,7 +141,8 @@ def rebuild_attribute_func(node):
     return '.'.join(names)
   
 class VisitJittedFunc(ast.NodeVisitor):
-    def visit_in_context(self, node, context, func_list, local_names, load_names):
+    def visit_in_context(self, node, func_args, context, func_list, local_names, load_names):
+        self.func_args=func_args
         self.context=context
         self.func_list=func_list
         self.local_names=local_names
@@ -152,7 +153,7 @@ class VisitJittedFunc(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Store):
             self.local_names.add(name)
             
-        if isinstance(node.ctx, ast.Load) and (name not in self.local_names) and (name in self.context):
+        if isinstance(node.ctx, ast.Load) and (name not in self.local_names) and (name not in self.func_args) and (name in self.context):
             print name, 'load from globals'
             self.load_names.add(name)
             #try:
@@ -192,6 +193,8 @@ class VisitJittedFunc(ast.NodeVisitor):
 
 jvisit=VisitJittedFunc().visit_in_context
 
+mod_names=None
+
 class DeferedJittedFunc(object):
     #__slots__=['sig', 'options', 'py_func', 'func_globals', 'func_name', 'module_name', 'module_dir', 'pyx_src', 'pxd_src']
     def __init__(self, sig, options, py_func):
@@ -229,15 +232,17 @@ class DeferedJittedFunc(object):
         func_def='cpdef'        
 
         func_ast=ast.parse(py_src)
-        jvisit(func_ast, self.func_globals, self.called_jitted_funcs, self.local_names, self.load_names)
-               
+        jvisit(func_ast, args, self.func_globals, self.called_jitted_funcs, self.local_names, self.load_names)
         
+                               
+
         #print called_jitted_funcs
         for jitted_func, mode, extra in self.called_jitted_funcs:
             
             if mode=='direct':
                 self.pyx_buf.write("from %s cimport %s\n"%(jitted_func.module_name, jitted_func.func_name))
-                self.pyx_buf.write("from %s import %s_init"%(jitted_func.module_name, jitted_func.func_name))
+                #self.pyx_buf.write("from %s import %s_init"%(jitted_func.module_name, jitted_func.func_name))
+                #self.pyx_buf.write('import %s')
             elif mode=='attribute':#fix
                 self.pyx_buf.write('cimport %s\n'%(jitted_func.module_name,))
                 attribute_func_name=extra
@@ -330,10 +335,7 @@ class DeferedJittedFunc(object):
         if not os.path.exists(self.module_dir):
             os.mkdir(self.module_dir)
 
-        for jitted_func,_,_ in self.called_jitted_funcs:
-            assert isinstance(jitted_func, DeferedJittedFunc)
-            if jitted_func.compile_state=='not_compile':
-                jitted_func.compile()        
+        
         
         pyx_file=os.path.join(self.module_dir, self.module_name+'.pyx')
         pxd_file=os.path.join(self.module_dir, self.module_name+'.pxd')
@@ -341,10 +343,7 @@ class DeferedJittedFunc(object):
         so_file=os.path.join(self.module_dir, self.module_name+so_ext)        
         init_file=os.path.join(self.module_dir, '__init__.py')
         
-        
-        #check
-        if not os.path.exists(so_file):            
-        
+        if not os.path.exists(so_file):
             fw=open(pyx_file,"w")
             fw.write(self.pyx_src)
             fw.close()
@@ -356,6 +355,16 @@ class DeferedJittedFunc(object):
             fw=open(init_file, "w")
             fw.close()
             
+        
+        for jitted_func,_,_ in self.called_jitted_funcs:
+            assert isinstance(jitted_func, DeferedJittedFunc)
+            if jitted_func.compile_state=='not_compile':
+                jitted_func.compile()                
+        
+        
+        #check
+        if not os.path.exists(so_file):            
+        
             
             extension = Extension(name = self.module_name,
                                   sources = [pyx_file],
@@ -364,14 +373,14 @@ class DeferedJittedFunc(object):
                                  )
                         
             #find called_jitted_funcs's module path
-            cython_include_dirs=[]
+            cython_include_dirs=set()
             for jitted_func, _, _ in self.called_jitted_funcs:
-                cython_include_dirs.append(jitted_func.module_dir)
+                cython_include_dirs.add(jitted_func.module_dir)
             print 'cython_include_dirs', self.func_name, cython_include_dirs
             build_extension = _get_build_extension()
             build_extension.extensions = cythonize([extension],
-                                                   #annotate=True,
-                                                   include_path=cython_include_dirs, 
+                                                   annotate=True,
+                                                   include_path=list(cython_include_dirs), 
                                                    #quiet=quiet
                                                    )
             temp_dir=os.path.join(cython_compile_dir, "__build_temp__")
@@ -379,25 +388,55 @@ class DeferedJittedFunc(object):
             build_extension.build_lib  = self.module_dir
             #print "build"
             build_extension.run()
-    
-        compiled_module=imp.load_dynamic(self.module_name, so_file) 
-        for jitted_func, _, _ in self.called_jitted_funcs:    
-            func_init=getattr(compiled_module, "%s_init"%jitted_func.func_name)
-            func_init(jitted_func.func_globals)
-            
-        func_init=getattr(compiled_module, "%s_init"%self.func_name)
-        func_init(self.func_globals)
         
-        print 'load',self.module_name
-        c_func=getattr(compiled_module, self.func_name)        
         self.compile_state='compiled'
-        self.c_func=c_func
+        self.so_file=so_file
+        mod_names.append(self)
+        
+        #compiled_module=imp.load_dynamic(self.module_name, so_file) 
+        #for jitted_func, _, _ in self.called_jitted_funcs:    
+            #func_init=getattr(compiled_module, "%s_init"%jitted_func.func_name)
+            #func_init(jitted_func.func_globals)
+            
+        #func_init=getattr(compiled_module, "%s_init"%self.func_name)
+        #func_init(self.func_globals)
+        
+        #print 'load',self.module_name
+        #c_func=getattr(compiled_module, self.func_name)        
+        #self.c_func=c_func
 
         
     def __call__(self, *args, **kwds):
+        global mod_names
+        mod_names=[]
+        print self.compile_state
         if self.compile_state=='not_compile':
             self.compile()
-        assert self.compile_state=='compiled'
+            assert self.compile_state=='compiled'
+         
+        if self.compile_state!='loaded':
+            path=set()
+            for jitted_func in mod_names:
+                for func, _, _ in jitted_func.called_jitted_funcs:
+                    print func.func_name
+                    path.add(func.module_dir)
+            sys.path.extend(path)
+            
+            for jitted_func in mod_names:
+                compiled_module=imp.load_dynamic(jitted_func.module_name, jitted_func.so_file) 
+                for func, _, _ in jitted_func.called_jitted_funcs:   
+                    func_module=imp.load_dynamic(func.module_name, func.so_file)
+                    func_init=getattr(func_module, "%s_init"%func.func_name)
+                    func_init(func.func_globals)
+                    
+                func_init=getattr(compiled_module, "%s_init"%jitted_func.func_name)
+                func_init(jitted_func.func_globals)
+                
+                print 'load',jitted_func.module_name
+                c_func=getattr(compiled_module, jitted_func.func_name)      
+                jitted_func.c_func=c_func        
+                jitted_func.compile_state='loaded'
+            #print mod_names
         return self.c_func(*args, **kwds)           
 
 
