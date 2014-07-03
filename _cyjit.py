@@ -249,7 +249,7 @@ class DeferedJittedFunc(object):
                 
                 if mode=='direct':
                     self.putln("from %s cimport %s__c"%(jitted_func.module_name, jitted_func.func_name))
-                    body=re.sub('%s *\('%jitted_func.func_name, '%s__c('%(jitted_func.func_name), body)
+                    body=re.sub(r'\b%s *\('%jitted_func.func_name, '%s__c('%(jitted_func.func_name), body)
                     
                 #elif mode=='attribute':#fix
                     #self.putln('cimport %s'%(jitted_func.module_name,))
