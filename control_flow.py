@@ -176,7 +176,7 @@ class myControlFlowAnalysis(object):
         return outgoing_blocks
 
 
-class clearUnreachNode():
+class clearUnreachedNode():
     def __init__(self, cf):
         self.cf=cf
 
@@ -202,11 +202,15 @@ class clearUnreachNode():
         self.mark()
         for node in funcdef_node.body[:]:
             self.visit_and_clear(node, funcdef_node.body)
+import numpy
 
-a=1       
+a=numpy.array([10,10])       
 s='''
 def f():
-  b=a
+  a=a[0]+1
+  if a>1:
+    a=1.0
+  a=a
 '''
 #s='''#1
 #def f(): #2
@@ -293,7 +297,7 @@ print ast.dump(node, include_attributes=True)
 
 cf=myControlFlowAnalysis(node)
 cf.run()
-clearUnreachNode(cf).run()
+clearUnreachedNode(cf).run()
 print cf.blocks
 #print cf.offset_node_map
 #print cf.offset_body_map
@@ -301,7 +305,8 @@ print cf.blocks
 from cffi import FFI
 ffi=FFI()
 
-from numba_types import Array, int32, float64, pyobject, Tuple, is_int_tuple, none, string, intp
+from numba_types import Array, int32, float64, pyobject, Tuple, is_int_tuple, none, string
+import numpy_support
 
 def is_same_node(node1, node2):
     if type(node1) != type(node2):
@@ -324,25 +329,27 @@ def is_same_node(node1, node2):
 
     
 class TypeInfer(object):
-    def __init__(self, cf):
+    def __init__(self, cf, globals):
         self.cf=cf
         self.current_block=None
         self.direct_flag={}
+        self.globals=globals
+        self.global_names=set([])
+        self.need_reinfer=False
         
     def run(self):
-        #self.need_reinfer=False
+        self.need_reinfer=False
         for entry_offset in sorted(self.cf.blocks.keys()):
             self.current_block=current_block=self.cf.blocks[entry_offset]
             incoming_blocks=[]
             for offset in current_block.incoming:
                 bk=self.cf.blocks[offset]
                 incoming_blocks.append(bk)
-                #if bk.context=={}:
-                #    self.need_reinfer=True
+                if bk.context=={}:
+                    self.need_reinfer=True
             self.join(current_block, incoming_blocks)
             context=current_block.context
             for offset in sorted(current_block.body):
-                
                 node=cf.offset_node_map[offset]
                 fname='visit_'+type(node).__name__
                 func=getattr(self, fname, None)
@@ -407,9 +414,24 @@ class TypeInfer(object):
             else:
                 raise Exception("should not in")
             
+    def get_value_type(self, value):
+        if isinstance(value, int):
+            return int32
+        elif isinstance(value, float):
+            return float64
+        elif numpy_support.is_array(value):
+            dtype = numpy_support.from_dtype(value.dtype)
+                        # force C contiguous
+            ty = Array(dtype, value.ndim, 'C')        
+            return ty
+        else:
+            return pyobject
+        
+        
+        
     def typeof_Str(self, node, context):
         return string
-                
+    
     def typeof_Name(self, node, context):
         assert isinstance(node.ctx, ast.Load) 
         name=node.id
@@ -418,6 +440,16 @@ class TypeInfer(object):
             node.type=type            
             self.current_block.load_names[name]=type
             return type
+        #lookup the name in globals
+        #now only consider int float array
+        else:
+            if name in self.globals:
+                value=self.globals[name]
+                type=self.get_value_type(value)
+                context[name]=type
+                node.type=type
+                self.global_names.add((name, type))
+                return type
         return none
 
     def typeof_Num(self, node, context):
@@ -561,7 +593,6 @@ class TypeInfer(object):
 class InsertCoerceNode(object):
     def __init__(self, cf):
         self.cf=cf
-        
 
     def run(self):
         for entry_offset in sorted(self.cf.blocks.keys()):
@@ -625,9 +656,10 @@ class myRewriter(ast.NodeVisitor):
     
         
         
-infer=TypeInfer(cf)
+infer=TypeInfer(cf, globals())
 infer.run()
-infer.run()
+while infer.need_reinfer:
+    infer.run()
 
 InsertCoerceNode(cf).run()
 #while infer.need_reinfer:
