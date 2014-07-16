@@ -1,6 +1,28 @@
 import ast
 from copy import deepcopy as copy
 
+class InsertPass(object):
+    def __init__(self, node):
+        self.pass_num=0
+        self.current_lineno=None
+        self.node=node
+        
+    def run(self):
+        self.insert_pass(self.node.body[0].body)
+    
+    def insert_pass(self, body):
+        stmt=None
+        for stmt in body:
+            self.current_lineno=stmt.lineno
+            stmt.lineno+=self.pass_num            
+            if isinstance(stmt, (ast.While, ast.For, ast.If)):
+                self.insert_pass(stmt.body)
+                self.insert_pass(stmt.orelse)
+                
+        if isinstance(stmt, (ast.For, ast.While)):
+            body.append(ast.Pass(lineno=self.current_lineno+1+self.pass_num, col_offset=stmt.col_offset))
+            self.pass_num+=1
+    
 class CFBlock(object):
     def __init__(self, offset):
         self.offset = offset
@@ -17,9 +39,8 @@ class CFBlock(object):
         args = self.body, self.outgoing, self.incoming
         return "block(body: %s, outgoing: %s, incoming: %s)" % args
 
-    def __iter__(self):
-        return iter(self.body)
-
+    
+    
 class myControlFlowAnalysis(object):
     def __init__(self, node):
         self.node=node
@@ -112,24 +133,29 @@ class myControlFlowAnalysis(object):
                 
     def visit_If(self, node):
         entry_blocks=[self._curblock]
-        ifblock=self._visit_body(node.body)
+        if_outgoing_block=self._visit_body(node.body)
 
         if node.orelse:
             self._incoming_blocks=entry_blocks
-            orelseblock=self._visit_body(node.orelse)
-            outgoing_blocks=ifblock+orelseblock
+            orelse_outgoing_block=self._visit_body(node.orelse)
+            outgoing_blocks=if_outgoing_block+orelse_outgoing_block
         else:
-            outgoing_blocks=entry_blocks+ifblock
+            outgoing_blocks=entry_blocks+if_outgoing_block
 
         self._force_new_block=True
         return outgoing_blocks
     
     def visit_While(self, node):        
         entry_blocks=[self._curblock]
-        whileblock=self._visit_body(node.body)
-        for block in whileblock:
+        while_outgoing_blocks=self._visit_body(node.body)
+        for block in while_outgoing_blocks:
             entry_blocks[0].incoming.append(block.offset)
-        outgoing_blocks=entry_blocks
+        if node.orelse:
+            self._incoming_blocks=entry_blocks
+            orelse_outgoing_block=self._visit_body(node.orelse)   
+            outgoing_blocks=orelse_outgoing_block
+        else:
+            outgoing_blocks=entry_blocks
         self._loop_next_blocks.pop()
         self._force_new_block=True
         return outgoing_blocks
@@ -176,20 +202,36 @@ class clearUnreachNode():
         self.mark()
         for node in funcdef_node.body[:]:
             self.visit_and_clear(node, funcdef_node.body)
-        
-        
-s='''#1
-def f(): #2
-  a=1.0 #3
-  while a>1: #4
-    a=1 #5
-    if a>1: #6
-      a=[] #7
-      break #8
-    a=a+1#9
-  if a:
-    b=int(a)
+
+a=1       
+s='''
+def f():
+  b=a
 '''
+#s='''#1
+#def f(): #2
+  #a=1 #3
+  #while a>1: #4
+    #break #5
+  #else: #6
+    #a=1.0 #7 
+  #b=a #8
+#'''      
+#s='''#1
+#def f(): #2
+  #while 1:  
+    #while 1: #3
+      #pass #4
+    #if 1:
+      #while 1:
+        #break
+        #return 0
+    #else:
+      #while 1:
+        #pass
+      #while 1:
+        #pass
+#'''
 #s='''#1
 #def f(): #2
   #a=1.0 #3
@@ -246,6 +288,9 @@ def f(): #2
   #b=a #12
 #'''
 node=ast.parse(s)
+InsertPass(node).run()
+print ast.dump(node, include_attributes=True)
+
 cf=myControlFlowAnalysis(node)
 cf.run()
 clearUnreachNode(cf).run()
@@ -253,9 +298,10 @@ print cf.blocks
 #print cf.offset_node_map
 #print cf.offset_body_map
 
+from cffi import FFI
+ffi=FFI()
 
-
-from numba_types import Array, int32, float64, pyobject, Tuple, is_int_tuple, none
+from numba_types import Array, int32, float64, pyobject, Tuple, is_int_tuple, none, string, intp
 
 def is_same_node(node1, node2):
     if type(node1) != type(node2):
@@ -361,7 +407,8 @@ class TypeInfer(object):
             else:
                 raise Exception("should not in")
             
-    
+    def typeof_Str(self, node, context):
+        return string
                 
     def typeof_Name(self, node, context):
         assert isinstance(node.ctx, ast.Load) 
@@ -403,48 +450,60 @@ class TypeInfer(object):
         return pyobject
     
     def typeof_Call(self, node, context):
-        func_name=node.func.id
-        if func_name in ['ones', 'zeros', 'empty']:
-            shape=node.args[0]
-            #dtype=node.args[1]
-            shape_type=self.typeof(shape)
-            if shape_type==int32:
-                return Array(float64, 1, 'C')
-            elif is_int_tuple(shape_type):
-                return Array(float64, shape_type.count, 'C')
+        if isinstance(node.func, ast.Name):
+            func_name=node.func.id
+            if func_name in ['ones', 'zeros', 'empty']:
+                shape=node.args[0]
+                #dtype=node.args[1]
+                shape_type=self.typeof(shape)
+                if shape_type==int32:
+                    return Array(float64, 1, 'C')
+                elif is_int_tuple(shape_type):
+                    return Array(float64, shape_type.count, 'C')
+                
+            elif func_name in ['int', 'float']:
+                for arg in node.args:
+                    self.typeof(arg, context)
+                return {'int':int32,'float':float64}[func_name]
             
-        elif func_name in ['int', 'float']:
-            for arg in node.args:
-                self.typeof(arg, context)
-            return {'int':int32,'float':float64}[func_name]
+            elif func_name in ['new']:
+                cdecl=node.args[0]
+                assert isinstance(cdecl, ast.Str)
+                return ffi._typeof(cdecl.s)
+            
+        elif isinstance(node.func, ast.Attribute):
+            #fix me
+            self.typeof(node.func.value, context)
         
-        else:
-            for arg in node.args:
-                self.typeof(arg, context)            
+ 
+        for arg in node.args:
+            self.typeof(arg, context)            
         
         return pyobject
     
     def typeof_Subscript(self, node, context):
         self.direct_flag[node]=False
         
-        value=node.value
-        slice_value=node.slice.value
-        if isinstance(value, ast.Name):
-            value_type=self.typeof_Name(value)
-            if isinstance(value_type, Array):
-                slice_value_type=self.typeof(slice_value)
-               
-                if slice_value_type==int32:
-                    ndim=value_type.ndim-1
-                elif is_int_tuple(slice_value_type):
-                    ndim=value_type.ndim-slice_value_type.count
-                else:
-                    return pyobject
-                
-                if ndim==0:
-                    self.direct_flag[node]=True
-                    return float64
-                return Array(float64, ndim, 'C')   
+        value_type=self.typeof(node.value, context)
+        slice_value_type=self.typeof(node.slice.value, context)
+
+        if isinstance(value_type, Array):
+
+            if slice_value_type==int32:
+                ndim=value_type.ndim-1
+            elif is_int_tuple(slice_value_type):
+                ndim=value_type.ndim-slice_value_type.count
+            else:
+                return pyobject
+            
+            if ndim==0:
+                self.direct_flag[node]=True
+                return float64
+            return Array(float64, ndim, 'C')   
+        elif isinstance(value_type, ffi.CType):
+            assert value_type.kind in ['pointer', 'array']
+            if slice_value_type==int32:
+                return value_type.item
             
         return pyobject
     
@@ -553,7 +612,15 @@ class myRewriter(ast.NodeVisitor):
         ty=getattr(node, 'type', None)
         if ty is not None:
             type_collect.add((node.id, ty))
-            node.id="%s_%s"%(node.id, ty)
+            if isinstance(ty, ffi.CType):
+                if ty.kind=='pointer':
+                    node.id="%s_%s"%(node.id, ty.cname.replace(' ','').replace('*','_p'))
+                elif ty.kind=='array':
+                    node.id="%s_%s"%(node.id, ty.cname.replace('[','_').replace(']',''))
+                else:
+                    node.id="%s_%s"%(node.id, ty.cname)
+            else:
+                node.id="%s_%s"%(node.id, ty)
             
     
         
