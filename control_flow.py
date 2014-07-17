@@ -20,7 +20,9 @@ class InsertPass(object):
                 self.insert_pass(stmt.orelse)
                 
         if isinstance(stmt, (ast.For, ast.While)):
-            body.append(ast.Pass(lineno=self.current_lineno+1+self.pass_num, col_offset=stmt.col_offset))
+            pass_node=ast.Pass(lineno=self.current_lineno+1, col_offset=stmt.col_offset)
+            body.append(pass_node)
+            self.current_lineno=pass_node.lineno
             self.pass_num+=1
     
 class CFBlock(object):
@@ -357,8 +359,15 @@ class TypeInfer(object):
                     func(node, context)
                 else:
                     print 'no %s'%fname
-
-            
+                    
+        for entry_offset in sorted(self.cf.blocks.keys()):
+            current_block=self.cf.blocks[entry_offset]
+            for offset in current_block.incoming:
+                bk=self.cf.blocks[offset]
+                if bk.context=={}:
+                    self.need_reinfer=False
+                    break
+                 
     def join(self, current_block, incoming_blocks):
         collect={}
         for block in incoming_blocks:
