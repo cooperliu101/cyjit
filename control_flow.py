@@ -3,7 +3,7 @@ from copy import deepcopy as copy
 
 class InsertPass(object):
     def __init__(self, node):
-        self.pass_num=0
+        self.add_num=0
         self.current_lineno=None
         self.node=node
         
@@ -13,8 +13,8 @@ class InsertPass(object):
     def insert_pass(self, body):
         stmt=None
         for stmt in body:
-            self.current_lineno=stmt.lineno
-            stmt.lineno+=self.pass_num            
+            stmt.lineno+=self.add_num
+            self.current_lineno=stmt.lineno          
             if isinstance(stmt, (ast.While, ast.For, ast.If)):
                 self.insert_pass(stmt.body)
                 self.insert_pass(stmt.orelse)
@@ -23,7 +23,7 @@ class InsertPass(object):
             pass_node=ast.Pass(lineno=self.current_lineno+1, col_offset=stmt.col_offset)
             body.append(pass_node)
             self.current_lineno=pass_node.lineno
-            self.pass_num+=1
+            self.add_num+=1
     
 class CFBlock(object):
     def __init__(self, offset):
@@ -207,13 +207,13 @@ class clearUnreachedNode():
 import numpy
 
 a=numpy.array([10,10])       
-s='''
-def f():
-  a=a[0]+1
-  if a>1:
-    a=1.0
-  a=a
-'''
+#s='''
+#def f():
+  #a=a[0]+1
+  #if a>1:
+    #a=1.0
+  #a=a
+#'''
 #s='''#1
 #def f(): #2
   #a=1 #3
@@ -223,21 +223,21 @@ def f():
     #a=1.0 #7 
   #b=a #8
 #'''      
-#s='''#1
-#def f(): #2
-  #while 1:  
-    #while 1: #3
-      #pass #4
-    #if 1:
-      #while 1:
-        #break
-        #return 0
-    #else:
-      #while 1:
-        #pass
-      #while 1:
-        #pass
-#'''
+s='''#1
+def f(): #2
+  while 1:  #3
+    while 1: #4
+      pass #5
+    if 1: #6
+      while 1: #7
+        break #8
+        return 0 #9
+    else: #10
+      while 1: #11
+        pass #12
+      while 1: #13 
+        pass #14
+'''
 #s='''#1
 #def f(): #2
   #a=1.0 #3
