@@ -497,7 +497,7 @@ def is_int_tuple(x):
 # Short names
 
 
-pyobject = Type('pyobject')
+pyobject = Type('object')
 none = Dummy('none')
 Any = Dummy('any')
 VarArg = Dummy('...')
