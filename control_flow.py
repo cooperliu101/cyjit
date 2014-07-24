@@ -2,13 +2,11 @@ import ast
 from copy import deepcopy as copy
 
 class TypeVal(object):
-    def __init__(self, type, order, def_offset, kind='local'):
+    def __init__(self, type, def_offset):
         self.type=type
-        self.order=order
         self.def_offset=def_offset
-        self.kind=kind
     def __repr__(self):
-        return "%s %s(order=%s) was define at %s"%(self.kind, self.type, self.order, self.def_offset)
+        return "%s was define at %s"%(self.type, self.def_offset)
     
 class InsertPass(object):
     def __init__(self, node):
@@ -221,14 +219,28 @@ class clearUnreachedNode():
             self.visit_and_clear(node, funcdef_node.body)
 import numpy
 
-a=numpy.array([1,2])    
+a=1    
 s='''
 def f():
-  a=a[0]+1
-  if a>1:
-    a=1.0
-  a=a
+  while 1:
+    a=0.0
+    a=1
+    a=0.0
+  return a
 '''
+#s='''
+#def f():
+  #while a:
+    #a=1.0
+  #b=a
+#'''
+#s='''
+#def f():
+  #a=a[0]+1
+  #if a>1:
+    #a=1.0
+  #a=a
+#'''
 #s='''#1
 #def f(): #2
   #b=a
@@ -367,13 +379,13 @@ def get_order(name, type):
         return 0
             
  
-direct_flag={}          
+direct_flag={}    
+global_names=set()
 class TypeInfer(object):
     def __init__(self, cf, globals):
         self.cf=cf
         self.current_block=None
         self.globals=globals
-        self.global_names=set([])
         self.need_reinfer=False
         
     def run(self):
@@ -386,10 +398,11 @@ class TypeInfer(object):
             incoming_blocks=[]
             for offset in current_block.incoming:
                 bk=self.cf.blocks[offset]
-                incoming_blocks.append(bk)
                 if bk.context=={} and offset>entry_offset:
                     need_reinfered_contexts.append(bk.context)
                     self.need_reinfer=True
+                else:
+                    incoming_blocks.append(bk)
             self.join(current_block, incoming_blocks)
             context=current_block.context
             for offset in sorted(current_block.body):
@@ -409,6 +422,11 @@ class TypeInfer(object):
                     break
                  
     def join(self, current_block, incoming_blocks):
+        if len(incoming_blocks)==1:
+            current_block.context.update(incoming_blocks[0].context)
+            current_block.coerce_names.update(incoming_blocks[0].coerce_names)
+            return
+        #len(incoming_blocks)>1
         collect={}
         all_names=set([])
         for block in incoming_blocks:
@@ -422,11 +440,11 @@ class TypeInfer(object):
                 elif name in self.globals:
                     value=self.globals[name]
                     type=self.get_value_type(value)
-                    typeval=TypeVal(type, 
-                                    order=get_order(name, type), 
-                                    def_offset=set([-1]),
-                                    kind='global')
+                    typeval=TypeVal(type,
+                                    def_offset={-1:type},
+                                    )
                     block.context[name]=typeval
+                    global_names.add((name, type))
                 else:
                     typeval=None
                 typevals.append(typeval)
@@ -435,13 +453,16 @@ class TypeInfer(object):
         
         for name, typevals in collect.iteritems():
             types=set([])
-            def_offset=set([])
+            def_offset={}
             for typeval in typevals:
+                if typeval is None:
+                    #warning if load this variable
+                    continue
                 types.add(typeval.type)
-                def_offset|=typeval.def_offset
+                def_offset.update(typeval.def_offset)
   
             coerce_type=reduce(self.spanning_types, types)
-            coerce_typeval=TypeVal(coerce_type, get_order(name, coerce_type), def_offset)
+            coerce_typeval=TypeVal(coerce_type, def_offset)
             current_block.context[name]=coerce_typeval
             for type in types:
                 if type != coerce_type:
@@ -521,13 +542,12 @@ class TypeInfer(object):
             value=self.globals[name]
             type=self.get_value_type(value)
             typeval=TypeVal(type, 
-                            order=get_order(name, type), 
-                            def_offset=set([-1]),
-                            kind='global')
+                            def_offset={-1:type},
+                            )
             context[name]=typeval
             node.typeval=typeval
             self.current_block.load_names[name]=typeval
-            self.global_names.add((name, type))
+            global_names.add((name, type))
             return type
         return none
 
@@ -633,9 +653,9 @@ class TypeInfer(object):
         
     def visit_While(self, node, context):
         test=node.test
-        if isinstance(test, ast.Compare):
-            self.typeof(test.left, context)
-            self.typeof(test.comparators[0], context)
+        self.typeof(test, context)
+
+        
             
     def visit_Expr(self, node, context):
         self.typeof(node, context)
@@ -649,8 +669,7 @@ class TypeInfer(object):
         if isinstance(target, ast.Name):
             target_name=target.id
             target.typeval=context[target_name]=TypeVal(value_type,
-                                                        order=get_order(target_name, value_type),
-                                                        def_offset=set([node.lineno]))
+                                                        def_offset={node.lineno:value_type})
 
             
     def visit_AugAssign(self, node, context):
@@ -661,8 +680,7 @@ class TypeInfer(object):
         coerce_type=self.spanning_types(target_type, value_type)
         target_name=target.id
         target.typeval=context[target_name]=TypeVal(coerce_type, 
-                                                    order=get_order(target_name, coerce_type), 
-                                                    def_offset=set([node.lineno]))
+                                                    def_offset={node.lineno:coerce_type})
 
         
     def visit_For(self, node, context):
@@ -671,347 +689,15 @@ class TypeInfer(object):
         if isinstance(for_iter, ast.Call):
             if for_iter.func.id in ['range', 'xrange']:
                 for_target.typeval=context[for_target.id]=TypeVal(int32,
-                                                                  order=get_order(for_target.id, int32), 
-                                                                  def_offset=set([node.lineno]))
+                                                                  def_offset={node.lineno:int32})
                 for arg in for_iter.args:
-                    self.typeof(arg, context)    
+                    assert self.typeof(arg, context)==int32  
                     
     def visit_Return(self, node, context):
         value=node.value
         self.typeof(value, context)
         
-        
-#class TypeInfer(object):
-    #def __init__(self, cf, globals):
-        #self.cf=cf
-        #self.current_block=None
-        #self.globals=globals
-        #self.global_names=set([])
-        #self.need_reinfer=False
-    
-    #def run(self):
-        #self.need_reinfer=False
-        #for entry_offset in sorted(self.cf.blocks.keys()):
-            #self.current_block=current_block=self.cf.blocks[entry_offset]
-            #incoming_blocks=[]
-            #for offset in current_block.incoming:
-                #bk=self.cf.blocks[offset]
-                #incoming_blocks.append(bk)
-                #if bk.context=={}:
-                    #self.need_reinfer=True
-            #self.join(current_block, incoming_blocks)
-            #context=current_block.context
-            #for offset in sorted(current_block.body):
-                #node=map_offset_node[offset]
-                #fname='visit_'+type(node).__name__
-                #func=getattr(self, fname, None)
-                #if func is not None:
-                    #func(node, context)
-                #else:
-                    #print 'no %s'%fname
-                    
-        #for entry_offset in sorted(self.cf.blocks.keys()):
-            #current_block=self.cf.blocks[entry_offset]
-            #for offset in current_block.incoming:
-                #bk=self.cf.blocks[offset]
-                #if bk.context=={}:
-                    #self.need_reinfer=False
-                    #break
-                 
-    #def join(self, current_block, incoming_blocks):
-        #collect={}
-        #for block in incoming_blocks:
-            #for name, typeval in block.context.iteritems():
-                #collect.setdefault(name, []).append(typeval)
-        
-        #for name, typevals in collect.iteritems():
-            #types=set([])
-            #def_offset=set([])
-            #for typeval in typevals:
-                #types.add(typeval.type)
-                #def_offset|=typeval.def_offset
-  
-            #coerce_type=reduce(self.spanning_types, types)
-            #coerce_typeval=TypeVal(coerce_type, get_order(name, coerce_type), def_offset)
-            #current_block.context[name]=coerce_typeval
-            #for type in types:
-                #if type != coerce_type:
-                    #current_block.coerce_names[name]=coerce_typeval
-                    #break
 
-    
-    #def typeof(self, node, context):
-        #node_type=type(node).__name__
-        ##print node_type
-        #fn=getattr(self, 'typeof_%s'%node_type, None)
-        #if fn==None:
-            #print "cant find typeof_%s"%node_type
-        #else:
-            #return fn(node, context)
-        
-    ##aggresive 
-    #def spanning_types(self, ty1, ty2):
-        #if ty1 == ty2:
-            #return ty1
-        #if ty1 in [float64, int32] and ty2 in [float64, int32]:
-            #return float64
-        #return pyobject
-    
-    ##no check for broadcast ability 
-    #def spanning_broadcast_types(self, ty1, ty2):
-        #assert isinstance(ty1, Array) or isinstance(ty2, Array)
-        #if isinstance(ty1, Array) and isinstance(ty2, Array):
-            #if ty1.ndim >= ty2.ndim:
-                #return ty1
-            #else:
-                #return ty2
-        #else:
-            #if isinstance(ty1, Array):
-                #if ty2 in [int32, float64]:
-                    #return ty1
-                #else:
-                    #raise Exception("Cannot infer broadcast types (%s,%s)"%(ty1, ty2))
-            #elif isinstance(ty2, Array):
-                #if ty1 in [int32, float64]:
-                    #return ty2
-                #else:
-                    #raise Exception("Cannot infer broadcast types (%s,%s)"%(ty1, ty2))
-            #else:
-                #raise Exception("should not in")
-            
-    #def get_value_type(self, value):
-        #if isinstance(value, int):
-            #return int32
-        #elif isinstance(value, float):
-            #return float64
-        #elif numpy_support.is_array(value):
-            #dtype = numpy_support.from_dtype(value.dtype)
-                        ## force C contiguous
-            #ty = Array(dtype, value.ndim, 'C')        
-            #return ty
-        #else:
-            #return pyobject
-        
-        
-        
-    #def typeof_Str(self, node, context):
-        #return string
-    
-    #def _get_incoming_blocks(self, block):
-        #return [self.cf.blocks[offset] for offset in block.incoming]
-    
-    #def lookup_current_context(self, name):
-        #current_context=self.current_block.context
-        #if name in current_context:
-            #return current_context[name]
-        #return None
-    
-    #def lookup_incoming_context(self, name):
-        #typevals=[]
-        #for incoming_block in self._get_incoming_blocks(self.current_block):
-            #if name in incoming_block.context:
-                #typeval=incoming_block.context[name]
-            #elif name in self.globals:
-                #value=self.globals[name]
-                #type=self.get_value_type(value)
-                #typeval=TypeVal(type, 
-                                #order=get_order(name, type), 
-                                #def_offset=set([-1]))
-            #else:
-                #raise Exception("cant find name %s"%name)
-        #typevals.append(typeval)
-        
-        #types=set([])
-        #def_offset=set([])
-        #for typeval in typevals:
-            #types.add(typeval.type)
-            #def_offset|=typeval.def_offset
-
-        #coerce_type=reduce(self.spanning_types, types)
-        #coerce_typeval=TypeVal(coerce_type, get_order(name, coerce_type), def_offset)
-        #self.current_block.context[name]=coerce_typeval
-        #for type in types:
-            #if type != coerce_type:
-                #current_block.coerce_names[name]=coerce_typeval
-                #break    
-        #return coerce_typeval
-    
-    #def lookup(self, name):
-        #typeval=self.lookup_current_context(name)
-        #if typeval is None:
-            #typeval=self.lookup_incoming_context(name)
-            
-            
-    #def typeof_Name(self, node, context):
-        #name=node.id
-        #if name in context:
-            #typeval=context[name]
-            #type=typeval.type
-            #node.typeval=typeval
-            #self.current_block.load_names[name]=typeval
-            #return type
-        ##lookup the name in globals
-        ##now only consider int float array
-        #elif name in self.globals:
-            #value=self.globals[name]
-            #type=self.get_value_type(value)
-            #typeval=TypeVal(type, 
-                            #order=get_order(name, type), 
-                            #def_offset=set([-1]))
-            #context[name]=typeval
-            #node.typeval=typeval
-            #self.global_names.add((name, type))
-            #return type
-        #return none
-
-    #def typeof_Num(self, node, context):
-        #if isinstance(node.n, int):
-            #return int32
-        #elif isinstance(node.n, float):
-            #return float64
-        
-    #def typeof_Expr(self, node, context):
-        #return self.typeof(node.value, context)
-    
-    #def typeof_BinOp(self, node, context):
-        #left_type=self.typeof(node.left, context)
-        #right_type=self.typeof(node.right, context)
-        #if isinstance(left_type, Array) or isinstance(right_type, Array):
-            #return self.spanning_broadcast_types(left_type, right_type)
-        
-        #return self.spanning_types(left_type, right_type)
-    
-    #def typeof_List(self, node, context):
-        #for elt in node.elts:
-            #self.typeof(elt, context)
-        #return pyobject
-    
-    #def typeof_Tuple(self, node, context):
-        #items=[]
-        #for elt in node.elts:
-            #items.append(self.typeof(elt, context))
-        #return Tuple(tuple(items))
-    
-    #def typeof_Dict(self, node, context):
-        #return pyobject
-    
-    #def typeof_Call(self, node, context):
-        #if isinstance(node.func, ast.Name):
-            #func_name=node.func.id
-            #if func_name in ['ones', 'zeros', 'empty']:
-                #shape=node.args[0]
-                ##dtype=node.args[1]
-                #shape_type=self.typeof(shape, context)
-                #if shape_type==int32:
-                    #return Array(float64, 1, 'C')
-                #elif is_int_tuple(shape_type):
-                    #return Array(float64, shape_type.count, 'C')
-                
-            #elif func_name in ['int', 'float']:
-                #for arg in node.args:
-                    #self.typeof(arg, context)
-                #return {'int':int32,'float':float64}[func_name]
-            
-            #elif func_name in ['new']:
-                #cdecl=node.args[0]
-                #assert isinstance(cdecl, ast.Str)
-                #return ffi._typeof(cdecl.s)
-            
-        #elif isinstance(node.func, ast.Attribute):
-            ##fix me
-            #self.typeof(node.func.value, context)
-        
- 
-        #for arg in node.args:
-            #self.typeof(arg, context)            
-        
-        #return pyobject
-    
-    #def typeof_Subscript(self, node, context):
-        #direct_flag[node]=False
-        
-        #value_type=self.typeof(node.value, context)
-        #slice_value_type=self.typeof(node.slice.value, context)
-
-        #if isinstance(value_type, Array):
-
-            #if slice_value_type==int32:
-                #ndim=value_type.ndim-1
-            #elif is_int_tuple(slice_value_type):
-                #ndim=value_type.ndim-slice_value_type.count
-            #else:
-                #return pyobject
-            
-            #if ndim==0:
-                #direct_flag[node]=True
-                #return float64
-            #return Array(float64, ndim, 'C')   
-         
-        #elif isinstance(value_type, ffi.CType):
-            #assert value_type.kind in ['pointer', 'array']
-            #if slice_value_type==int32:
-                #return value_type.item
-            
-        #return pyobject
-    
-    #def typeof_Compare(self, node, context):
-        #self.typeof(node.left, context)
-        #self.typeof(node.comparators[0], context)
-        
-    #def visit_If(self, node, context):
-        #test=node.test
-        #self.typeof(test, context)
-
-        
-        
-    #def visit_While(self, node, context):
-        #test=node.test
-        #if isinstance(test, ast.Compare):
-            #self.typeof(test.left, context)
-            #self.typeof(test.comparators[0], context)
-            
-    #def visit_Expr(self, node, context):
-        #self.typeof(node, context)
-        
-    #def visit_Assign(self, node, context):
-        #target=node.targets[0]
-        
-        #value=node.value
-        ##value_type='object'
-        #value_type=self.typeof(value, context)
-        #if isinstance(target, ast.Name):
-            #target_name=target.id
-            #target.typeval=context[target_name]=TypeVal(value_type,
-                                                        #order=get_order(target_name, value_type),
-                                                        #def_offset=set([node.lineno]))
-
-            
-    #def visit_AugAssign(self, node, context):
-        #target=node.target
-        #value=node.value
-        #target_type=self.typeof(target, context)
-        #value_type=self.typeof(value, context)
-        #coerce_type=self.spanning_types(target_type, value_type)
-        #target_name=target.id
-        #target.typeval=context[target_name]=TypeVal(coerce_type, 
-                                                    #order=get_order(target_name, coerce_type), 
-                                                    #def_offset=set([node.lineno]))
-
-        
-    #def visit_For(self, node, context):
-        #for_iter=node.iter
-        #for_target=node.target
-        #if isinstance(for_iter, ast.Call):
-            #if for_iter.func.id in ['range', 'xrange']:
-                #for_target.typeval=context[for_target.id]=TypeVal(int32,
-                                                                  #order=get_order(for_target.id, int32), 
-                                                                  #def_offset=set([node.lineno]))
-                #for arg in for_iter.args:
-                    #self.typeof(arg, context)    
-                    
-    #def visit_Return(self, node, context):
-        #value=node.value
-        #self.typeof(value, context)   
         
 class InsertCoerceNode(object):
     def __init__(self, cf):
@@ -1069,13 +755,70 @@ class InsertCoerceNode(object):
             body.insert(idx+1+block.insert_num, insert_node)
             block.insert_num+=1
  
-used_types={}
+class InsertCoerceNode(object):
+    def __init__(self, cf):
+        self.cf=cf
+
+    def run(self):
+        for entry_offset in sorted(self.cf.blocks.keys()):
+            if entry_offset==-1:
+                continue
+            current_block=self.cf.blocks[entry_offset]
+            for load_name, load_typeval in current_block.load_names.iteritems():
+                
+                if load_name in current_block.coerce_names:
+                    coerce_typeval=current_block.coerce_names[load_name]
+                    for incoming_block in self._get_incoming_blocks(current_block):
+                        incoming_typeval=incoming_block.context[load_name]
+                        if incoming_typeval.type!=coerce_typeval.type:
+                            insert_node=ast.Assign(targets=[ast.Name(id=load_name, 
+                                                                     ctx=ast.Store, 
+                                                                     typeval=coerce_typeval)],
+                                                   value=ast.Name(id=load_name, 
+                                                                  ctx=ast.Load, 
+                                                                  typeval=incoming_typeval))
+                            self.insert_at_end(incoming_block, insert_node)
+                        
+    def _get_incoming_blocks(self, block):
+        return [self.cf.blocks[offset] for offset in block.incoming]    
+
+    def insert_at_end(self, block, insert_node):
+        end_offset=block.body[-1]
+        if end_offset==-1:
+            body=map_offset_body[min(map_offset_body.keys())]
+            body.insert(0, insert_node)
+            return 
+        node=map_offset_node[end_offset]
+        body=map_offset_body[end_offset]
+        idx=body.index(node)
+        if isinstance(node, (ast.If, ast.Break)):
+            #pre_idx=idx-1
+            #if pre_idx>=0:
+            #    if is_same_node(body[pre_idx], insert_node):
+            #        return 
+            body.insert(idx, insert_node)
+        elif isinstance(node, (ast.While, ast.For)):
+            assert len(block.body)==1
+            for incoming_block in self._get_incoming_blocks(block):
+                self.insert_at_end(incoming_block, copy(insert_node))
+                    
+        else:
+            
+            #if next_idx<len(body):
+                #if is_same_node(body[next_idx], insert_node):
+                    #return 
+            #if block.end_offset==None:
+            #    block.end_offset=block.body[-1]
+            body.insert(idx+1+block.insert_num, insert_node)
+            block.insert_num+=1 
+
+used_types=set([])
 class myRewriter(ast.NodeTransformer): 
     def visit_Name(self, node):
         typeval=getattr(node, 'typeval', None)
         if typeval is not None:
-            type, order=typeval.type, typeval.order
-            used_types[(node.id, type, order)]=typeval.kind
+            type=typeval.type
+            name=node.id
 
             if isinstance(type, ffi.CType):
                 if ty.kind=='pointer':
@@ -1085,7 +828,9 @@ class myRewriter(ast.NodeTransformer):
                 else:
                     node.id="%s_%s"%(node.id, type.cname)
             else:
-                node.id="%s_%s"%(node.id, order)
+                order=get_order(name, type)
+                node.id="%s_%s"%(name, order)
+                used_types.add((name, type, order))
             
         return node
 
@@ -1166,20 +911,20 @@ class InsertDefination(object):
         self.node=node
     def run(self):
         func_body=self.node.body[0].body
-        for (name, type, order), kind in used_types.iteritems():
+        for name, type, order in used_types:
             if isinstance(type, Array):
                 for idx in range(type.ndim)[::-1]:
                     defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%("int", "%s_stride%s"%('%s_%s'%(name,order), idx))))
                     func_body.insert(0, defination_node)                    
                 defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%("char *", "%s_data_ptr"%('%s_%s'%(name,order)))))
                 func_body.insert(0, defination_node)     
-                if kind=='global':
+                if (name, type) in global_names:
                     defination_node=ast.Expr(value=ast.Name(id="cdef %s %s=GLOBALS['%s']"%(pyobject, '%s_%s'%(name,order), name)))
                 else:
                     defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%(pyobject, '%s_%s'%(name,order))))
                 func_body.insert(0, defination_node)                
             else:
-                if kind=='global':
+                if (name, type) in global_names:
                     defination_node=ast.Expr(value=ast.Name(id="cdef %s %s=GLOBALS['%s']"%(type, '%s_%s'%(name,order), name)))
                 else:
                     defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%(type, '%s_%s'%(name,order))))
