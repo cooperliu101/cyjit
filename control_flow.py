@@ -2,7 +2,7 @@ import ast
 from copy import deepcopy as copy
 
 class TypeVal(object):
-    def __init__(self, type, def_offset):
+    def __init__(self, type, def_offset=None):
         self.type=type
         self.def_offset=def_offset
     def __repr__(self):
@@ -222,10 +222,11 @@ import numpy
 a=1    
 s='''
 def f():
-  while 1:
+  if 1:
     a=0.0
-    a=1
-    a=0.0
+  a
+  if 1:
+    a=0
   return a
 '''
 #s='''
@@ -303,19 +304,19 @@ def f():
     #b=3 #8
   #b=4 #9
 #'''
-#s='''#1
-#def f(): #2
-  #a=1 #3
-  #if a>1: #4
-    #b=a #5
-  #else: #6
-    #if a>1: #7
-      #a=1.0 #8
-    #else: #9
-      #if a>1: #10
-        #b=a #11
-  #b=a #12
-#'''
+s='''#1
+def f(): #2
+  a=1 #3
+  if a>1: #4
+    b=a #5
+  else: #6
+    if a>1: #7
+      a=1.0 #8
+    else: #9
+      if a>1: #10
+        b=a #11
+  b=a #12
+'''
 node=ast.parse(s)
 InsertPass(node).run()
 print ast.dump(node, include_attributes=True)
@@ -381,6 +382,7 @@ def get_order(name, type):
  
 direct_flag={}    
 global_names=set()
+load_coerce_infos=set()
 class TypeInfer(object):
     def __init__(self, cf, globals):
         self.cf=cf
@@ -464,10 +466,6 @@ class TypeInfer(object):
             coerce_type=reduce(self.spanning_types, types)
             coerce_typeval=TypeVal(coerce_type, def_offset)
             current_block.context[name]=coerce_typeval
-            for type in types:
-                if type != coerce_type:
-                    current_block.coerce_names[name]=coerce_typeval
-                    break
 
     
     def typeof(self, node, context):
@@ -529,12 +527,17 @@ class TypeInfer(object):
         
         
     def typeof_Name(self, node, context):
+        is_coerce=False
         name=node.id
         if name in context:
             typeval=context[name]
             type=typeval.type
             node.typeval=typeval
-            self.current_block.load_names[name]=typeval
+            for offset,ty in typeval.def_offset.iteritems(): #change attribuate name
+                if ty != type:
+                    load_coerce_infos.add((name, type, offset, ty))
+                    
+            #self.current_block.load_names[name]=typeval
             return type
         ##lookup the name in globals
         ##now only consider int float array
@@ -697,121 +700,92 @@ class TypeInfer(object):
         value=node.value
         self.typeof(value, context)
         
-
         
-class InsertCoerceNode(object):
-    def __init__(self, cf):
-        self.cf=cf
+#class InsertCoerceNode(object):
+    #def __init__(self, cf):
+        #self.cf=cf
 
-    def run(self):
-        for entry_offset in sorted(self.cf.blocks.keys()):
-            if entry_offset==-1:
-                continue
-            current_block=self.cf.blocks[entry_offset]
-            for load_name, load_typeval in current_block.load_names.iteritems():
-                if load_name in current_block.coerce_names:
-                    coerce_typeval=current_block.coerce_names[load_name]
-                    for incoming_block in self._get_incoming_blocks(current_block):
-                        incoming_typeval=incoming_block.context[load_name]
-                        if incoming_typeval.type!=coerce_typeval.type:
-                            insert_node=ast.Assign(targets=[ast.Name(id=load_name, 
-                                                                     ctx=ast.Store, 
-                                                                     typeval=coerce_typeval)],
-                                                   value=ast.Name(id=load_name, 
-                                                                  ctx=ast.Load, 
-                                                                  typeval=incoming_typeval))
-                            self.insert_at_end(incoming_block, insert_node)
+    #def run(self):
+        #for entry_offset in sorted(self.cf.blocks.keys()):
+            #if entry_offset==-1:
+                #continue
+            #current_block=self.cf.blocks[entry_offset]
+            #for load_name, load_typeval in current_block.load_names.iteritems():
+                #if load_name in current_block.coerce_names:
+                    #coerce_typeval=current_block.coerce_names[load_name]
+                    #for incoming_block in self._get_incoming_blocks(current_block):
+                        #incoming_typeval=incoming_block.context[load_name]
+                        #if incoming_typeval.type!=coerce_typeval.type:
+                            #insert_node=ast.Assign(targets=[ast.Name(id=load_name, 
+                                                                     #ctx=ast.Store, 
+                                                                     #typeval=coerce_typeval)],
+                                                   #value=ast.Name(id=load_name, 
+                                                                  #ctx=ast.Load, 
+                                                                  #typeval=incoming_typeval))
+                            #self.insert_at_end(incoming_block, insert_node)
                         
-    def _get_incoming_blocks(self, block):
-        return [self.cf.blocks[offset] for offset in block.incoming]    
+    #def _get_incoming_blocks(self, block):
+        #return [self.cf.blocks[offset] for offset in block.incoming]    
 
-    def insert_at_end(self, block, insert_node):
-        end_offset=block.body[-1]
-        if end_offset==-1:
-            body=map_offset_body[min(map_offset_body.keys())]
-            body.insert(0, insert_node)
-            return 
-        node=map_offset_node[end_offset]
-        body=map_offset_body[end_offset]
-        idx=body.index(node)
-        if isinstance(node, (ast.If, ast.Break)):
-            #pre_idx=idx-1
-            #if pre_idx>=0:
-            #    if is_same_node(body[pre_idx], insert_node):
-            #        return 
-            body.insert(idx, insert_node)
-        elif isinstance(node, (ast.While, ast.For)):
-            assert len(block.body)==1
-            for incoming_block in self._get_incoming_blocks(block):
-                self.insert_at_end(incoming_block, copy(insert_node))
+    #def insert_at_end(self, block, insert_node):
+        #end_offset=block.body[-1]
+        #if end_offset==-1:
+            #body=map_offset_body[min(map_offset_body.keys())]
+            #body.insert(0, insert_node)
+            #return 
+        #node=map_offset_node[end_offset]
+        #body=map_offset_body[end_offset]
+        #idx=body.index(node)
+        #if isinstance(node, (ast.If, ast.Break)):
+            ##pre_idx=idx-1
+            ##if pre_idx>=0:
+            ##    if is_same_node(body[pre_idx], insert_node):
+            ##        return 
+            #body.insert(idx, insert_node)
+        #elif isinstance(node, (ast.While, ast.For)):
+            #assert len(block.body)==1
+            #for incoming_block in self._get_incoming_blocks(block):
+                #self.insert_at_end(incoming_block, copy(insert_node))
                     
-        else:
+        #else:
             
-            #if next_idx<len(body):
-                #if is_same_node(body[next_idx], insert_node):
-                    #return 
-            #if block.end_offset==None:
-            #    block.end_offset=block.body[-1]
-            body.insert(idx+1+block.insert_num, insert_node)
-            block.insert_num+=1
+            ##if next_idx<len(body):
+                ##if is_same_node(body[next_idx], insert_node):
+                    ##return 
+            ##if block.end_offset==None:
+            ##    block.end_offset=block.body[-1]
+            #body.insert(idx+1+block.insert_num, insert_node)
+            #block.insert_num+=1
  
 class InsertCoerceNode(object):
     def __init__(self, cf):
         self.cf=cf
 
     def run(self):
-        for entry_offset in sorted(self.cf.blocks.keys()):
-            if entry_offset==-1:
-                continue
-            current_block=self.cf.blocks[entry_offset]
-            for load_name, load_typeval in current_block.load_names.iteritems():
-                
-                if load_name in current_block.coerce_names:
-                    coerce_typeval=current_block.coerce_names[load_name]
-                    for incoming_block in self._get_incoming_blocks(current_block):
-                        incoming_typeval=incoming_block.context[load_name]
-                        if incoming_typeval.type!=coerce_typeval.type:
-                            insert_node=ast.Assign(targets=[ast.Name(id=load_name, 
-                                                                     ctx=ast.Store, 
-                                                                     typeval=coerce_typeval)],
-                                                   value=ast.Name(id=load_name, 
-                                                                  ctx=ast.Load, 
-                                                                  typeval=incoming_typeval))
-                            self.insert_at_end(incoming_block, insert_node)
-                        
+        for name,coerce_type,offset,incoming_type in load_coerce_infos:    
+            insert_node=ast.Assign(targets=[ast.Name(id=name, 
+                                                ctx=ast.Store, 
+                                                typeval=TypeVal(coerce_type))],
+                                   value=ast.Name(id=name, 
+                                             ctx=ast.Load, 
+                                             typeval=TypeVal(incoming_type)))
+            self.insert_below(offset, insert_node)                
+                    
     def _get_incoming_blocks(self, block):
         return [self.cf.blocks[offset] for offset in block.incoming]    
 
-    def insert_at_end(self, block, insert_node):
-        end_offset=block.body[-1]
-        if end_offset==-1:
+    def insert_below(self, offset, insert_node):
+        if offset==-1:
             body=map_offset_body[min(map_offset_body.keys())]
             body.insert(0, insert_node)
             return 
-        node=map_offset_node[end_offset]
-        body=map_offset_body[end_offset]
+        node=map_offset_node[offset]
+        body=map_offset_body[offset]
         idx=body.index(node)
-        if isinstance(node, (ast.If, ast.Break)):
-            #pre_idx=idx-1
-            #if pre_idx>=0:
-            #    if is_same_node(body[pre_idx], insert_node):
-            #        return 
-            body.insert(idx, insert_node)
-        elif isinstance(node, (ast.While, ast.For)):
-            assert len(block.body)==1
-            for incoming_block in self._get_incoming_blocks(block):
-                self.insert_at_end(incoming_block, copy(insert_node))
-                    
-        else:
-            
-            #if next_idx<len(body):
-                #if is_same_node(body[next_idx], insert_node):
-                    #return 
-            #if block.end_offset==None:
-            #    block.end_offset=block.body[-1]
-            body.insert(idx+1+block.insert_num, insert_node)
-            block.insert_num+=1 
-
+        assert isinstance(node, (ast.Assign, ast.AugAssign))
+        body.insert(idx+1, insert_node)
+        
+        
 used_types=set([])
 class myRewriter(ast.NodeTransformer): 
     def visit_Name(self, node):
