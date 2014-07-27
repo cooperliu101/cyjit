@@ -219,16 +219,20 @@ class clearUnreachedNode():
             self.visit_and_clear(node, funcdef_node.body)
 import numpy
 
-a=1    
 s='''
-def f():
-  if 1:
-    a=0.0
-  a
-  if 1:
-    a=0
-  return a
+def f(a):
+  b=a.b.c.d
 '''
+#a=1    
+#s='''
+#def f():
+  #if 1:
+    #a=0.0
+  #a
+  #if 1:
+    #a=0
+  #return a
+#'''
 #s='''
 #def f():
   #while a:
@@ -304,19 +308,19 @@ def f():
     #b=3 #8
   #b=4 #9
 #'''
-s='''#1
-def f(): #2
-  a=1 #3
-  if a>1: #4
-    b=a #5
-  else: #6
-    if a>1: #7
-      a=1.0 #8
-    else: #9
-      if a>1: #10
-        b=a #11
-  b=a #12
-'''
+#s='''#1
+#def f(): #2
+  #a=1 #3
+  #if a>1: #4
+    #b=a #5
+  #else: #6
+    #if a>1: #7
+      #a=1.0 #8
+    #else: #9
+      #if a>1: #10
+        #b=a #11
+  #b=a #12
+#'''
 node=ast.parse(s)
 InsertPass(node).run()
 print ast.dump(node, include_attributes=True)
@@ -381,6 +385,7 @@ def get_order(name, type):
             
  
 direct_flag={}    
+load_args=set()
 global_names=set()
 load_coerce_infos=set()
 class TypeInfer(object):
@@ -388,6 +393,7 @@ class TypeInfer(object):
         self.cf=cf
         self.current_block=None
         self.globals=globals
+        self.args={'a':int32}
         self.need_reinfer=False
         
     def run(self):
@@ -439,6 +445,12 @@ class TypeInfer(object):
             for block in incoming_blocks:
                 if name in block.context:
                     typeval=block.context[name]
+                elif name in self.args:
+                    type=self.args[name]
+                    typeval=TypeVal(type,
+                                    def_offset={-1:type},
+                                    )
+                    block.context[name]=typeval                    
                 elif name in self.globals:
                     value=self.globals[name]
                     type=self.get_value_type(value)
@@ -541,6 +553,15 @@ class TypeInfer(object):
             return type
         ##lookup the name in globals
         ##now only consider int float array
+        elif name in self.args:
+            type=self.args[name]
+            typeval=TypeVal(type, 
+                            def_offset={-1:type},
+                            )
+            context[name]=typeval
+            node.typeval=typeval
+            load_args.add((name, type))
+            return type
         elif name in self.globals:
             value=self.globals[name]
             type=self.get_value_type(value)
@@ -549,7 +570,7 @@ class TypeInfer(object):
                             )
             context[name]=typeval
             node.typeval=typeval
-            self.current_block.load_names[name]=typeval
+            #self.current_block.load_names[name]=typeval
             global_names.add((name, type))
             return type
         return none
@@ -585,6 +606,12 @@ class TypeInfer(object):
     def typeof_Dict(self, node, context):
         return pyobject
     
+    #fix me
+    def typeof_Attribute(self, node, context):
+        self.typeof(node.value, context)
+        return pyobject
+        
+        
     def typeof_Call(self, node, context):
         if isinstance(node.func, ast.Name):
             func_name=node.func.id
@@ -609,8 +636,8 @@ class TypeInfer(object):
             
         elif isinstance(node.func, ast.Attribute):
             #fix me
-            self.typeof(node.func.value, context)
-        
+            self.typeof(node.func, context)
+            
  
         for arg in node.args:
             self.typeof(arg, context)            
