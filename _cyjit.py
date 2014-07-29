@@ -27,9 +27,10 @@ def get_func_source(func):
     src_lines=[]
     keep=False
     for line in getsource(func).split('\n'):
-        if line.strip().startswith('def'):
+        if line.strip().startswith('def') and not keep:
             indent_size=len(get_indent(line))
             keep=True
+            
         if keep and line.strip():
             src_lines.append(line[indent_size:].rstrip())
     src='\n'.join(src_lines)
