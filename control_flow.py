@@ -2,11 +2,11 @@ import ast
 from copy import deepcopy as copy
 
 class TypeVal(object):
-    def __init__(self, type, def_offset=None):
+    def __init__(self, type, def_offsets=None):
         self.type=type
-        self.def_offset=def_offset
+        self.def_offsets=def_offsets
     def __repr__(self):
-        return "%s was define at %s"%(self.type, self.def_offset)
+        return "%s was define at %s"%(self.type, self.def_offsets)
     
 class InsertPass(object):
     def __init__(self, node):
@@ -390,6 +390,7 @@ direct_flag={}
 arg_names=set()
 global_names=set()
 load_coerce_infos=set()
+index_rewrite_infos=set()
 class TypeInfer(object):
     def __init__(self, cf, args, func_globals):
         self.cf=cf
@@ -453,14 +454,14 @@ class TypeInfer(object):
                 #elif name in self.args:
                     #type=self.args[name]
                     #typeval=TypeVal(type,
-                                    #def_offset={-1:type},
+                                    #def_offsets={-1:type},
                                     #)
                     #block.context[name]=typeval                    
                 elif name in self.globals:
                     value=self.globals[name]
                     type=self.get_value_type(value)
                     typeval=TypeVal(type,
-                                    def_offset={-1:type},
+                                    def_offsets={-1:type},
                                     )
                     block.context[name]=typeval
                     global_names.add((name, type))
@@ -472,16 +473,16 @@ class TypeInfer(object):
         
         for name, typevals in collect.iteritems():
             types=set([])
-            def_offset={}
+            def_offsets={}
             for typeval in typevals:
                 if typeval is None:
                     #warning if load this variable
                     continue
                 types.add(typeval.type)
-                def_offset.update(typeval.def_offset)
+                def_offsets.update(typeval.def_offsets)
   
             coerce_type=reduce(self.spanning_types, types)
-            coerce_typeval=TypeVal(coerce_type, def_offset)
+            coerce_typeval=TypeVal(coerce_type, def_offsets)
             current_block.context[name]=coerce_typeval
 
     
@@ -549,9 +550,9 @@ class TypeInfer(object):
             typeval=context[name]
             type=typeval.type
             node.typeval=typeval
-            for offset,ty in typeval.def_offset.iteritems(): #change attribuate name
-                if type==pyobject and isinstance(ty, Array):
-                    continue
+            for offset,ty in typeval.def_offsets.iteritems(): #change attribuate name
+                #if type==pyobject and isinstance(ty, Array):
+                #    continue
                 if ty != type:
                     load_coerce_infos.add((name, type, offset, ty))
                     
@@ -560,7 +561,7 @@ class TypeInfer(object):
         #elif name in self.args:
             #type=self.args[name]
             #typeval=TypeVal(type, 
-                            #def_offset={-1:type},
+                            #def_offsets={-1:type},
                             #)
             #context[name]=typeval
             #node.typeval=typeval
@@ -570,7 +571,7 @@ class TypeInfer(object):
             value=self.globals[name]
             type=self.get_value_type(value)
             typeval=TypeVal(type, 
-                            def_offset={-1:type},
+                            def_offsets={-1:type},
                             )
             context[name]=typeval
             node.typeval=typeval
@@ -651,13 +652,10 @@ class TypeInfer(object):
         return pyobject
     
     def typeof_Subscript(self, node, context):
-        direct_flag[node]=False
-        
         value_type=self.typeof(node.value, context)
         slice_value_type=self.typeof(node.slice.value, context)
 
         if isinstance(value_type, Array):
-
             if slice_value_type==int32:
                 ndim=value_type.ndim-1
             elif is_int_tuple(slice_value_type):
@@ -666,7 +664,7 @@ class TypeInfer(object):
                 return pyobject
             
             if ndim==0:
-                direct_flag[node]=True
+                node.is_index_rewrite=True
                 return value_type.dtype
             return Array(value_type.dtype, ndim, 'C')   
          
@@ -689,7 +687,7 @@ class TypeInfer(object):
             name=arg.id
             type=self.args[name]
             typeval=TypeVal(type,
-                            def_offset={-1:type},
+                            def_offsets={-1:type},
                             )
             arg.typeval=typeval
             context[name]=typeval       
@@ -719,7 +717,7 @@ class TypeInfer(object):
         if isinstance(target, ast.Name):
             target_name=target.id
             target.typeval=context[target_name]=TypeVal(value_type,
-                                                        def_offset={node.lineno:value_type})
+                                                        def_offsets={node.lineno:value_type})
 
             
     def visit_AugAssign(self, node, context):
@@ -730,7 +728,7 @@ class TypeInfer(object):
         coerce_type=self.spanning_types(target_type, value_type)
         target_name=target.id
         target.typeval=context[target_name]=TypeVal(coerce_type, 
-                                                    def_offset={node.lineno:coerce_type})
+                                                    def_offsets={node.lineno:coerce_type})
 
         
     def visit_For(self, node, context):
@@ -739,7 +737,7 @@ class TypeInfer(object):
         if isinstance(for_iter, ast.Call):
             if for_iter.func.id in ['range', 'xrange']:
                 for_target.typeval=context[for_target.id]=TypeVal(int32,
-                                                                  def_offset={node.lineno:int32})
+                                                                  def_offsets={node.lineno:int32})
                 for arg in for_iter.args:
                     assert self.typeof(arg, context)==int32  
                     
@@ -747,59 +745,51 @@ class TypeInfer(object):
         value=node.value
         self.typeof(value, context)
         
- 
-class InsertCoerceNode(object):
-    def __init__(self, cf):
-        self.cf=cf
-
-    def run(self):
-        for name,coerce_type,offset,incoming_type in load_coerce_infos:    
-            insert_node=ast.Assign(targets=[ast.Name(id=name, 
-                                                ctx=ast.Store, 
-                                                typeval=TypeVal(coerce_type))],
-                                   value=ast.Name(id=name, 
-                                             ctx=ast.Load, 
-                                             typeval=TypeVal(incoming_type)))
-            self.insert_below(offset, insert_node)                
-                    
-    def _get_incoming_blocks(self, block):
-        return [self.cf.blocks[offset] for offset in block.incoming]    
-
-    def insert_below(self, offset, insert_node):
-        if offset==-1:
-            body=map_offset_body[-1]
+def insert_below(offset, insert_nodes):
+    if offset==-1:
+        body=map_offset_body[-1]
+        for insert_node in insert_nodes[::-1]:
             body.insert(0, insert_node)
-            return 
+    else:
         node=map_offset_node[offset]
+        assert isinstance(node, (ast.Assign, ast.AugAssign))
         body=map_offset_body[offset]
         idx=body.index(node)
-        assert isinstance(node, (ast.Assign, ast.AugAssign))
-        body.insert(idx+1, insert_node)
-        
+        for insert_node in insert_nodes[::-1]:
+            body.insert(idx+1, insert_node)            
+
+
+class InsertCoerceNode(object):
+    def __init__(self, node):
+        self.node=node
+
+    def run(self):
+        for name,type,offset,ty in load_coerce_infos:    
+            #type<-ty below offset
+            insert_node=ast.Assign(targets=[ast.Name(id=name, 
+                                                ctx=ast.Store, 
+                                                typeval=TypeVal(type))],
+                                   value=ast.Name(id=name, 
+                                             ctx=ast.Load, 
+                                             typeval=TypeVal(ty)))
+            insert_below(offset, [insert_node])                
+                    
+
         
 used_types=set([])
-class myRewriter(ast.NodeTransformer): 
-    def visit_FunctionDef(self, node):
-        for arg in node.args.args:
-            assert isinstance(arg, ast.Name)
-            type=arg.typeval.type
-            type=pyobject if isinstance(type, Array) else type #array defined as object
-            name=arg.id
-            order=get_order(name, type)
-            arg.id='%s %s_%s'%(type, name, order)
-            used_types.add((name, arg.typeval.type, order))
-        new_body=[]
-        for stmt in node.body:
-            stmt=self.visit(stmt)
-            new_body.append(stmt)
-        node.body[:]=new_body
-        return node
+
+class NameRewriter(ast.NodeVisitor):
+    def __init__(self, node):
+        self.node=node
     
+    def run(self):
+        self.visit(self.node.body[0])
+        
     def visit_Name(self, node):
         typeval=getattr(node, 'typeval', None)
         if typeval is not None:
             type=typeval.type
-            type=pyobject if isinstance(type, Array) else type #array defined as object
+            #type=pyobject if isinstance(type, Array) else type #array defined as object
             name=node.id
 
             if isinstance(type, ffi.CType):
@@ -812,17 +802,25 @@ class myRewriter(ast.NodeTransformer):
             else:
                 order=get_order(name, type)
                 node.id="%s_%s"%(name, order)
-                used_types.add((name, typeval.type, order)) #original type
+                used_types.add((name, type, order)) #original type
             
-        return node
-
+class SubscriptRewriter(ast.NodeTransformer):
+    def __init__(self, node):
+        self.node=node
+    
+    def run(self):
+        self.visit(self.node.body[0])
+        
     def visit_Subscript(self, node):
-        value=node.value
-        slice_value=node.slice.value        
-        self.visit(value)
-        self.visit(slice_value)
-        if direct_flag[node]:      
+        is_index_rewrite=getattr(node,'is_index_rewrite',None)
+        if is_index_rewrite:     
+            value=node.value
+            slice_value=node.slice.value             
             value_type=value.typeval.type
+            index_rewrite_infos.add((value.id,
+                                     value.typeval.type, 
+                                     tuple(value.typeval.def_offsets.items()),
+                                     ))
             assert isinstance(value_type, Array)
             assert value_type.ndim>=1
             if isinstance(slice_value, ast.Num):
@@ -856,68 +854,59 @@ class myRewriter(ast.NodeTransformer):
                 s+='))[0]'
                 new_node=ast.Name(id=s)
                 return new_node
-        return node    
+        return node       
 
-    
 class InsertArrayInfo(object):
-    def __init__(self):
-        pass
-    
-    def insert_below(self, offset, array_name):
-        if offset==-1:
-            body=map_offset_body[-1]
-            print id(body)
-            idx_def=-1
-        else:
-            node=map_offset_node[offset]
-            body=map_offset_body[offset]
-            idx_def=body.index(node)
-            #assert isinstance(node, ast.Assign)
-            #target=node.targets[0]
-            #typeval=target.typeval
-            #assert isinstance(typeval.type, Array)
-        data_ptr_node=ast.Expr(value=ast.Name(id="%s_data_ptr = PyArray_BYTES(%s)"%(array_name.id, array_name.id)))
-        body.insert(idx_def+1, data_ptr_node) 
-        for idx in range(array_name.typeval.type.ndim):
-            stride_node=ast.Expr(value=ast.Name(id="%s_stride%s = PyArray_STRIDES(%s)[%s]"%(array_name.id, idx, array_name.id, idx)))
-            body.insert(idx_def+idx+2, stride_node)
-            
+    def __init__(self, node):
+        self.node=node
+
     def run(self):
-        for node, flag in direct_flag.iteritems():
-            if flag==True:
-                assert isinstance(node.value, ast.Name)
-                for offset in node.value.typeval.def_offset:
-                    self.insert_below(offset, node.value) #fix repeat!!
+        for array_name, type, def_offsets in index_rewrite_infos:
+            assert isinstance(type, Array)
+            for offset,ty in def_offsets:
+                assert ty==type
+                insert_nodes=[]
+                data_ptr_node=ast.Expr(value=ast.Name(id="cdef char * %s_data_ptr = PyArray_BYTES(%s)"%(array_name, array_name)))
+                insert_nodes.append(data_ptr_node)
+
+                for idx in range(type.ndim):
+                    stride_node=ast.Expr(value=ast.Name(id="cdef py_ssize_t %s_stride%s = PyArray_STRIDES(%s)[%s]"%(array_name, idx, array_name, idx)))    
+                    insert_nodes.append(stride_node)
+                    
+                insert_below(offset, insert_nodes)
 
 class InsertDefination(object):
     def __init__(self, node):
         self.node=node
     def run(self):
-        func_body=self.node.body[0].body
-        for name, type, order in used_types:
+        functionDef_node=self.node.body[0]
+        for arg in functionDef_node.args.args:
+            type=arg.typeval.type
             if isinstance(type, Array):
-                for idx in range(type.ndim)[::-1]:
-                    defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%("int", "%s_stride%s"%('%s_%s'%(name,order), idx))))
-                    func_body.insert(0, defination_node)                    
-                defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%("char *", "%s_data_ptr"%('%s_%s'%(name,order)))))
-                func_body.insert(0, defination_node)     
-                if (name, type) in global_names:
-                    defination_node=ast.Expr(value=ast.Name(id="cdef %s %s=GLOBALS['%s']"%(pyobject, '%s_%s'%(name,order), name)))
-                    func_body.insert(0, defination_node)  
-                elif (name, type) in arg_names:
-                    pass #already defined in function head               
-                else:
-                    defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%(pyobject, '%s_%s'%(name,order))))
-                    func_body.insert(0, defination_node)                
+                type=pyobject
+            arg.id='%s %s'%(type, arg.id)
+            
+        defination_nodes=[]
+        for name, type, order in sorted(used_types, key=lambda item:item[2]):
+            if (name, type) in global_names:
+                if isinstance(type, Array):
+                    type=pyobject
+                global_def_node=ast.Expr(value=ast.Name(id="cdef %s %s=GLOBALS['%s']"%(type, '%s_%s'%(name,order), name)))
+                defination_nodes.append(global_def_node)                    
+            elif (name, type) in arg_names:
+                pass #already defined in function head
             else:
-                if (name, type) in global_names:
-                    defination_node=ast.Expr(value=ast.Name(id="cdef %s %s=GLOBALS['%s']"%(type, '%s_%s'%(name,order), name)))
-                    func_body.insert(0, defination_node)                    
-                elif (name, type) in arg_names:
-                    pass #already defined in function head
-                else:
-                    defination_node=ast.Expr(value=ast.Name(id="cdef %s %s"%(type, '%s_%s'%(name,order))))
-                    func_body.insert(0, defination_node)
+                if isinstance(type, Array):
+                    type=pyobject                    
+                local_def_node=ast.Expr(value=ast.Name(id="cdef %s %s"%(type, '%s_%s'%(name,order))))
+                defination_nodes.append(local_def_node)
+                
+        self.insert_defination(defination_nodes)
+                    
+    def insert_defination(self, defination_nodes):
+        func_body=self.node.body[0].body
+        for node in defination_nodes[::-1]:
+            func_body.insert(0, node)
                     
 from inspect import getsource, getargspec
 
@@ -965,15 +954,13 @@ def cyjit(argtypes=[], restype=None):
         while infer.need_reinfer:
             infer.run()
         print cf.blocks
-        InsertCoerceNode(cf).run()
-        #while infer.need_reinfer:
-        #    infer.run()
-        myRewriter().visit(node)
-        #RewriteSubscript().visit(node)
-        InsertArrayInfo().run()
+        InsertCoerceNode(node).run()
+        NameRewriter(node).run()
+        SubscriptRewriter(node).run()
+        InsertArrayInfo(node).run()
         InsertDefination(node).run()
         print map_name_types
-        #print ast.dump(node)
+
         
         from astunparse import Unparser
         from cStringIO import StringIO
@@ -985,9 +972,9 @@ def cyjit(argtypes=[], restype=None):
 
 if __name__ == '__main__':
     a=1
-    @cyjit(argtypes=[Array(int32,1,'C')],restype=None)
+    @cyjit(argtypes=[Array(int32,2,'C')],restype=None)
     def f(a):
         b=a[0]
-        if a[0]>1:
+        if b[0]>1:
             a=1.0
         b=a
