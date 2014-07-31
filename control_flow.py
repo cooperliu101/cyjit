@@ -54,10 +54,10 @@ class myControlFlowAnalysis(object):
     def __init__(self, node):
         self.node=node
         
-        first_block=CFBlock(offset=-1)
-        first_block.body.append(-1)
-        self.blocks={-1:first_block}
-        
+        #first_block=CFBlock(offset=-1)
+        #first_block.body.append(-1)
+        #self.blocks={-1:first_block}
+        self.blocks={}
         self._incoming_blocks=[] #for next block
         self._curblock=None
         self._force_new_block=True
@@ -226,10 +226,6 @@ class clearUnreachedNode():
         self.mark()
         for node in funcdef_node.body[:]:
             self.visit_and_clear(node, funcdef_node.body)
-           
-
-import numpy
-
 
 #a=1    
 #s='''
@@ -334,10 +330,11 @@ import numpy
 #print cf.offset_node_map
 #print cf.offset_body_map
 
+import numpy
 from cffi import FFI
 ffi=FFI()
 
-from numba_types import Array, int32, float64, pyobject, Tuple, is_int_tuple, none, string
+from numba_types import Array, int32, float64, pyobject, Tuple, is_int_tuple, none, string, i1, integer_domain, real_domain
 import numpy_support
 
 def is_same_node(node1, node2):
@@ -400,13 +397,15 @@ class TypeInfer(object):
         self.need_reinfer=False
         
     def run(self):
+        self.infer()
+        while self.need_reinfer:
+            self.infer()
+    
+    def infer(self):
         need_reinfered_contexts=[]
         self.need_reinfer=False
         
         for entry_offset in sorted(self.cf.blocks.keys()):
-            if entry_offset==-1:
-                continue
-        
             self.current_block=current_block=self.cf.blocks[entry_offset]
             incoming_blocks=[]
             for offset in current_block.incoming:
@@ -450,18 +449,12 @@ class TypeInfer(object):
             typevals=[]
             for block in incoming_blocks:
                 if name in block.context:
-                    typeval=block.context[name]
-                #elif name in self.args:
-                    #type=self.args[name]
-                    #typeval=TypeVal(type,
-                                    #def_offsets={-1:type},
-                                    #)
-                    #block.context[name]=typeval                    
+                    typeval=block.context[name]                  
                 elif name in self.globals:
                     value=self.globals[name]
                     type=self.get_value_type(value)
                     typeval=TypeVal(type,
-                                    def_offsets={-1:type},
+                                    def_offsets={-2:type}, #offset -2 means defination location is globals
                                     )
                     block.context[name]=typeval
                     global_names.add((name, type))
@@ -499,8 +492,11 @@ class TypeInfer(object):
     def spanning_types(self, ty1, ty2):
         if ty1 == ty2:
             return ty1
-        if ty1 in [float64, int32] and ty2 in [float64, int32]:
-            return float64
+        if ty1 in real_domain and ty2 in integer_domain: #need rank?
+            return ty1
+        if ty1 in integer_domain and ty2 in real_domain:
+            return ty2
+
         return pyobject
     
     #no check for broadcast ability 
@@ -555,27 +551,16 @@ class TypeInfer(object):
                 #    continue
                 if ty != type:
                     load_coerce_infos.add((name, type, offset, ty))
-                    
-            #self.current_block.load_names[name]=typeval
             return type
-        #elif name in self.args:
-            #type=self.args[name]
-            #typeval=TypeVal(type, 
-                            #def_offsets={-1:type},
-                            #)
-            #context[name]=typeval
-            #node.typeval=typeval
-            #load_args.add((name, type))
-            #return type
+
         elif name in self.globals:
             value=self.globals[name]
             type=self.get_value_type(value)
             typeval=TypeVal(type, 
-                            def_offsets={-1:type},
+                            def_offsets={-2:type}, #offset -2 means defination location is globals
                             )
             context[name]=typeval
             node.typeval=typeval
-            #self.current_block.load_names[name]=typeval
             global_names.add((name, type))
             return type
         else:
@@ -631,10 +616,10 @@ class TypeInfer(object):
                 elif is_int_tuple(shape_type):
                     return Array(float64, shape_type.count, 'C')
                 
-            elif func_name in ['int', 'float']:
+            elif func_name in ['int', 'float', 'i1']: #fix me! use globals info to decide identifer
                 for arg in node.args:
                     self.typeof(arg, context)
-                return {'int':int32,'float':float64}[func_name]
+                return {'int':int32,'float':float64, 'i1':i1}[func_name]
             
             elif func_name in ['new']:
                 cdecl=node.args[0]
@@ -687,7 +672,7 @@ class TypeInfer(object):
             name=arg.id
             type=self.args[name]
             typeval=TypeVal(type,
-                            def_offsets={-1:type},
+                            def_offsets={-1:type}, #offset -1 means defination location is function args
                             )
             arg.typeval=typeval
             context[name]=typeval       
@@ -739,15 +724,15 @@ class TypeInfer(object):
                 for_target.typeval=context[for_target.id]=TypeVal(int32,
                                                                   def_offsets={node.lineno:int32})
                 for arg in for_iter.args:
-                    assert self.typeof(arg, context)==int32  
+                    self.typeof(arg, context)#==int32  
                     
     def visit_Return(self, node, context):
         value=node.value
         self.typeof(value, context)
         
 def insert_below(offset, insert_nodes):
-    if offset==-1:
-        body=map_offset_body[-1]
+    if offset in [-1, -2]:
+        body=map_offset_body[-1] #func_body
         for insert_node in insert_nodes[::-1]:
             body.insert(0, insert_node)
     else:
@@ -844,7 +829,7 @@ class SubscriptRewriter(ast.NodeTransformer):
                 s='(<%s *>(%s_data_ptr'%(value_type.dtype, value.id)
                 for idx, elt in enumerate(slice_value.elts):
                     if isinstance(elt, ast.Name):
-                        assert elt.type_info[0]==int32
+                        assert elt.typeval.type==int32
                         s+='+%s_stride%s*%s'%(value.id, idx, elt.id)
                     elif isinstance(elt, ast.Num):
                         assert isinstance(elt.n, int)
@@ -870,7 +855,7 @@ class InsertArrayInfo(object):
                 insert_nodes.append(data_ptr_node)
 
                 for idx in range(type.ndim):
-                    stride_node=ast.Expr(value=ast.Name(id="cdef py_ssize_t %s_stride%s = PyArray_STRIDES(%s)[%s]"%(array_name, idx, array_name, idx)))    
+                    stride_node=ast.Expr(value=ast.Name(id="cdef py_ssize_t %s_stride%s = PyArray_STRIDE(%s,%s)"%(array_name, idx, array_name, idx)))    
                     insert_nodes.append(stride_node)
                     
                 insert_below(offset, insert_nodes)
@@ -951,8 +936,6 @@ def cyjit(argtypes=[], restype=None):
         
         infer=TypeInfer(cf, args, func.func_globals)
         infer.run()
-        while infer.need_reinfer:
-            infer.run()
         print cf.blocks
         InsertCoerceNode(node).run()
         NameRewriter(node).run()
@@ -971,10 +954,13 @@ def cyjit(argtypes=[], restype=None):
     return wrap            
 
 if __name__ == '__main__':
+    #fix me handle restype!!
     a=1
-    @cyjit(argtypes=[Array(int32,2,'C')],restype=None)
-    def f(a):
-        b=a[0]
-        if b[0]>1:
-            a=1.0
-        b=a
+    @cyjit(argtypes=[Array(int32,2,'C')],
+           restype=None,) #wather to support locals={'a':int32} like type defination? For now, No
+    def f(b):
+        s=0
+        for i in range(b.shape[0]):
+            for j in range(b.shape[1]):
+                s+=b[i,j]
+        return s
